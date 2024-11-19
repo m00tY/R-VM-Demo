@@ -1,0 +1,363 @@
+---
+editor_options: 
+  markdown: 
+    wrap: 128
+---
+
+# Memory and Register Declaration
+
+A 32 bit integer is used as the number of memory locations for the VM. Given that the max value of a signed 16 bit integer is
+*65536* or (2\^16), that is how many data storage locations are present in the VM. There are additionally 19 registers of 32 bit
+integers, most of which (16) are general purpose and can be used to send data to the emulated CPU. The memory locations and
+registers were defined and stored as an array.
+
+"The general purpose registers can be used to perform any program calculations. The program counter is an unsigned integer which
+is the address of the next instruction in memory to execute. The condition flags tell us information about the previous
+calculation." - an excerpt from (<https://www.jmeiners.com/lc3-vm/#what-is-a-virtual-machine->).
+
+```{r}
+MEMORY_MAX = 2^16 # 128KB
+MemoryList <- integer(MEMORY_MAX)
+
+Registers <- list (  
+    R0      = 1, 
+    R1      = 2, 
+    R2      = 3, 
+    R3      = 4, 
+    R4      = 5,
+    R5      = 6, 
+    R6      = 7, 
+    R7      = 8,
+    PC      = 9, 
+    COND    = 10, 
+    COUNT   = 11 
+)
+
+MMR <- c(
+    MR_KBSR = 0xFE00, # keyboard status
+    MR_KBDR = 0xFE02  # keyboard data
+)
+
+mem_write <- function(address, val) {
+    MemoryList[address] = val
+}
+
+mem_read <- function(address) {
+    if (address == MMR$MR_KBSR) {
+        if (check_key()) {
+            MemoryList[MMR$MR_KBSR] <- bitwShiftL(1, 15)  
+             character
+            MemoryList[MMR$MR_KBSR] <- as.integer(charToRaw(readline("Enter a character: "))[1])
+        } else {
+            MemoryList[MMR$MR_KBSR] <- 0
+        }
+    }
+    
+    return(MemoryList[address])
+
+}
+
+RegisterValList <- integer(length = 19) # 19 = number of enumerated values
+```
+
+# Opcodes and Flags
+
+An opcode is a command that describes which action the CPU should carryout. CPU instructions have both an opcode and parameters,
+the opcode states which command should be carried out and the parameters act as inputs to the task being performed.
+
+The COND register stores condition flags, in this instance, that condition exclusively refers to whether a given value is
+positive or negative. By bitshifting each value by a given amount, we can implement this condition flag feature.
+
+```{r}
+Opcodes <- list (
+    BR    = 1,    # branch
+    ADD   = 2,    # add
+    LD    = 3,    # load 
+    ST    = 4,    # store
+    JSR   = 5,    # jump register 
+    AND   = 6,    # bitwise and 
+    LDR   = 7,    # load register
+    STR   = 8,    # store register
+    RTI   = 9,    # unused 
+    NOT   = 10,    # bitwise not
+    LDI   = 11,   # load indirect
+    STI   = 12,   # store indirect
+    JMP   = 13,   # jump
+    RES   = 14,   # reserved (unused)
+    LEA   = 15,   # load effective address
+    TRAP  = 16    # execute trap
+)
+
+Flags <- list (
+    FLAG_ZERO       = bitwShiftL(1, 0),   # Zero
+    FLAG_POSITIVE   = bitwShiftL(1, 1),   # Postive
+    FLAG_NEGATIVE  = bitwShiftL(1, 2)    # Negative
+)
+FlagList <- integer(length(Flags))
+
+```
+
+# Helper Functions for Instructions
+
+```{r}
+
+To16Bit <- function(x) {
+  # Check if x is NULL or empty
+  if (is.null(x) || length(x) == 0) {
+    cat("To16Bit received NULL or empty value\n")
+    return(0)  # Return 0 as a default fallback
+  }
+  
+  x <- bitwAnd(x, 0xFFFF)
+  
+  # Debug print to check x after masking
+  cat("Value after masking to 16-bit: ", x, "\n")
+  
+  if (x > 0x7FFF) {
+    x <- x - 0x10000  # Two's complement
+  }
+  
+  return(x)
+}
+
+GetBitCount <- function(x) {
+  # If x is 0, return 1 since we need at least 1 bit to represent zero
+  if (x == 0) {
+    return(1)
+  }
+  
+  # Calculate the number of bits required to represent x
+  return(floor(log2(abs(x))) + 1)
+}
+
+SignExtend <- function(x, BitCount) {
+  # Debugging check
+  cat("Original value before SignExtend: ", x, "\n")
+  
+  x <- To16Bit(x)  # Ensure it's a 16-bit value
+  # Check if the sign bit (BitCount - 1) is set
+  if (bitwShiftR(x, BitCount - 1) & 1) {
+    # If set, extend the sign by setting the upper bits
+    x <- bitwOr(x, bitwShiftL(0xFFFF, BitCount))
+  }
+  cat("Value after SignExtend: ", x, "\n")
+  
+  return(x)
+}
+
+# UpdateFlags function to check and set flags based on register value
+UpdateFlags <- function(R) {
+  # Check if the input register value is NULL or empty
+  RBits <- GetBitCount(R)
+  RExtended <- SignExtend(R, RBits)  # Call SignExtend with R and RBits
+  
+  if (is.null(RExtended) || length(RExtended) == 0) {
+    return(NULL)
+  }
+  
+  # Check the value and set the condition flag directly
+  if (RExtended == 0) {
+    RegisterValList[Registers$COND] <- Flags$FLAG_ZERO  # Set the zero flag (1)
+  } else if ((bitwAnd(RExtended, 0x8000)) != 0) {  # Check if the sign bit (MSB) is 1 (negative)
+    RegisterValList[Registers$COND] <- Flags$FLAG_NEGATIVE  # Set the negative flag (4)
+    
+  } else {
+    RegisterValList[Registers$COND] <- Flags$FLAG_POSITIVE  # Set the positive flag (2)
+    
+  }
+}
+
+
+```
+
+# Main Loop
+
+```{r}
+
+RegisterValList[Registers$COND] <- Flags$FLAG_ZERO #apply FLAG_ZERO to the COND register
+
+PC_START <- 0x3000 #set computer to default value at start
+RegisterValList[Registers$PC] <- PC_START
+
+mem_read <- function(address) {
+  return(MemoryList[address + 1])  # +1 because R is 1-indexed, unlike C++
+}
+
+signal(SIGINT, handle_interrupt);
+disable_input_buffering();
+
+running <- TRUE;
+while (running) {
+    Instruction <- mem_read(RegisterValList[Registers$PC])
+    RegisterValList[Registers$PC] <- (RegisterValList[Registers$PC])
+
+    OperationCode <- bitwShiftR(Instruction, 12)
+
+    switch ( 
+    OperationCode,
+    ADD = ADD(),
+    LDI = LDI(),
+    RTI = RTI(),
+    AND = AND(),
+    NOT = NOT(),
+    BR = BR(),
+    JMP = JMP(),
+    JSR = JSR(),
+    LD = LD(),
+    LDR = LDR(),
+    LEA = LEA(),
+    ST = ST(),
+    STI = STI(),
+    STR = STR(),
+    RES()        #default for bad code
+)
+    restore_input_buffering();
+}
+
+```
+
+# Instruction Functions
+
+So cool it rhymes!
+
+```{r}
+
+ADD <- function() {
+  RegisterValList[Registers$R0] <- bitwAnd(bitwShiftR(Instruction, 9), 0x7)   # destination register
+  RegisterValList[Registers$R1] <- bitwAnd(bitwShiftR(Instruction, 6), 0x7) # first operand
+  ImmFlag <- bitwAnd(bitwShiftR(Instruction, 5), 0x1) #Immediate Mode Flag
+  
+  if (ImmFlag) {
+    imm5 <- SignExtend(bitwAnd(Instruction, 0x1F), 5)
+    RegisterValList[Registers$R0] = RegisterValList[Registers$R1] + imm5
+    
+  } else {
+    r2 <- bitwAnd(Instruction, 0x7)
+    RegisterValList[Registers$R0] = RegisterValList[Registers$R1] +     RegisterValList[Registers$R2]
+  }
+  UpdateFlags(RegisterValList[Registers$R0])
+}
+
+LDI <- function() {
+  RegisterValList[Registers$R0] <- bitwAnd(bitwShiftR(Instruction, 9), 0x7)
+  PCOffset <- SignExtend(bitwAnd(Instruction, 0x1FF), 9)
+  
+  RegisterValList[Registers$R0] <- mem_read(RegisterValList[Registers$PC]) + PCOffset
+  
+  UpdateFlags(RegisterValList[Registers$R0])
+}
+
+RTI <- function() {
+    abort()
+}
+
+RES <- function() {
+    abort()
+}
+
+AND <- function() {
+   RegisterValList[Registers$R0] <- bitwAnd(bitwShiftR(Instruction, 9), 0x7)
+   RegisterValList[Registers$R1] <- bitwAnd(bitwShiftR(Instruction, 9), 0x7)
+   ImmFlag <- bitwAnd(bitwShiftR(Instruction, 5), 0x1)
+   
+    if (ImmFlag) {
+      imm5 <- SignExtend(bitwAnd(Instruction, 0x1F), 5)
+      RegisterValList[Registers$R0] = bitwAnd(RegisterValList[Registers$R1], imm5)
+    } else {
+      RegisterValList[Registers$R2] <- bitwAnd(Instruction, 0x7)
+      RegisterValList[Registers$R0] <- bitwAnd(RegisterValList[Registers$R1], (RegisterValList[Registers$R2]))
+    }
+   UpdateFlags(RegisterValList[Registers$R0])
+}
+
+NOT <- function() {
+   RegisterValList[Registers$R0] <- bitwAnd(bitwShiftR(Instruction, 9), 0x7)
+   RegisterValList[Registers$R1] <- bitwAnd(bitwShiftR(Instruction, 6), 0x7)
+   
+   RegisterValList[Registers$R0] <- bitwNot(RegisterValList[Registers$R1])
+   UpdateFlags(RegisterValList[Registers$R0])
+   
+}
+
+BR <- function() {
+  PCOffset <- SignExtend(bitwAnd(Instruction, 0x1FF), 9)
+  CondFlag <- bitwAnd(bitwShiftR(Instruction, 9), 0x7)
+  
+  if (bitwAnd(CondFlag, RegisterValList[Registers$COND])) {
+    RegisterValList[Registers$COND] <- RegisterValList[Registers$COND] + PCOffset
+  }
+}
+
+JMP <- function() {
+  RegisterValList[Registers$R1] <- bitwAnd(bitwShiftR(Instruction, 6), 0x7)
+  RegisterValList[Registers$PC] <-  RegisterValList[Registers$R1]
+}
+
+JSR <- function() {
+  LongFlag <- bitwAnd(bitwShiftR(Instruction, 11), 1)
+  RegisterValList[Registers$R7] <- RegisterValList[Registers$PC]
+  
+  if (LongFlag) {
+    LongPCOffset <- SignExtend(bitwAnd(Instruction, 0x7FF), 11)
+    RegisterValList[Registers$PC] <- RegisterValList[Registers$PC] + LongPCOffset
+  } else {
+    RegisterValList[Registers$R1] <- bitwAnd(bitwShiftR(Instruction, 6), 0x7)
+    RegisterValList[Registers$PC] <- RegisterValList[Registers$R1]
+  }
+}
+
+LD <- function() {
+   RegisterValList[Registers$R0] <- bitwAnd(bitwShiftR(Instruction, 9), 0x7)
+   PCOffset <- SignExtend(bitwAnd(Instruction, 0x1FF), 9)
+   RegisterValList[Registers$R0] <- mem_read(RegisterValList[Registers$PC] + PCOffset) 
+   UpdateFlags(RegisterValList[Registers$R0])
+}
+
+LDR <- function() {
+  RegisterValList[Registers$R0] <- bitwAnd(bitwShiftR(Instruction, 9), 0x7)
+  RegisterValList[Registers$R1] <- bitwAnd(bitwShiftR(Instruction, 6), 0x7)
+  Offset <- SignExtend(bitwAnd(Instruction, 0x3F), 6)
+  RegisterValList[Registers$R0] <- mem_read(RegisterValList[Registers$R1] + Offset)
+  
+  UpdateFlags(RegisterValList[Registers$R0])
+}
+
+LEA <- function() {
+  RegisterValList[Registers$R0] <- bitwAnd(bitwShiftR(Instruction, 9), 0x7)
+  PCOffset <- SignExtend(bitwAnd(Instruction, 0x1FF), 9)
+  
+  RegisterValList[Registers$R0] <- RegisterValList[Registers$PC] + PCOffset
+  UpdateFlags(RegisterValList[Registers$R0])
+}
+
+ST <- function() {
+  RegisterValList[Registers$R0] <- bitwAnd(bitwShiftR(Instruction, 9), 0x7)
+  PCOffset <- SignExtend(bitwAnd(Instruction, 0x1FF), 9)
+  mem_write(RegisterValList[Registers$PC] + PCOffset, RegisterValList[Registers$R0] )
+}
+
+STI <- function() {
+  RegisterValList[Registers$R0] <- bitwAnd(bitwShiftR(Instruction, 9), 0x7)
+  PCOffset <- SignExtend(bitwAnd(Instruction, 0x1FF), 9)
+  mem_write(RegisterValList[Registers$PC] + PCOffset, RegisterValList[Registers$R0] )
+}
+
+
+STR <- function() {
+    RegisterValList[Registers$R0] <- bitwAnd(bitwShiftR(Instruction, 9), 0x7)
+    RegisterValList[Registers$R1] <- bitwAnd(bitwShiftR(Instruction, 6), 0x7)
+    Offset <- SignExtend(bitwAnd(Instruction, 0x3F), 6)
+    mem_write(RegisterValList[Registers$R1] + PCOffset, RegisterValList[Registers$R0] )
+}
+
+
+
+
+```
+
+# Memory Access
+
+```{r}
+
+
+```
