@@ -16,7 +16,7 @@ is the address of the next instruction in memory to execute. The condition flags
 calculation." - an excerpt from (<https://www.jmeiners.com/lc3-vm/#what-is-a-virtual-machine->).
 
 ```{r}
-MEMORY_MAX = 2^16 # 128KB
+MEMORY_MAX = 2^16 # 128KB allocated as memory locations (32 bits each)
 MemoryList <- integer(MEMORY_MAX)
 
 Registers <- list (  
@@ -167,7 +167,6 @@ UpdateFlags <- function(R) {
   }
 }
 
-
 ```
 
 # Main Loop
@@ -179,22 +178,29 @@ RegisterValList[Registers$COND] <- Flags$FLAG_ZERO #apply FLAG_ZERO to the COND 
 PC_START <- 0x3000 #set computer to default value at start
 RegisterValList[Registers$PC] <- PC_START
 
-mem_read <- function(address) {
-  return(MemoryList[address + 1])  # +1 because R is 1-indexed, unlike C++
+mem_read_value <- function(address) {
+  return(MemoryList[address]) #add 1 if not working as intended
 }
+
+handle_interupt <- function() {
+    cat("\nInterrupt signal (SIGINT) received. Exiting gracefully.\n")
+    quit(save = "no", status = 1)
+}
+setInterruptHandler(handle_interrupt)
+
+disable_input_buffering();
 
 signal(SIGINT, handle_interrupt);
 disable_input_buffering();
 
 running <- TRUE;
 while (running) {
-    Instruction <- mem_read(RegisterValList[Registers$PC])
+    Instruction <- mem_read_value(RegisterValList[Registers$PC])
     RegisterValList[Registers$PC] <- (RegisterValList[Registers$PC])
 
     OperationCode <- bitwShiftR(Instruction, 12)
 
-    switch ( 
-    OperationCode,
+    switch (OperationCode,
     ADD = ADD(),
     LDI = LDI(),
     RTI = RTI(),
@@ -350,14 +356,46 @@ STR <- function() {
     mem_write(RegisterValList[Registers$R1] + PCOffset, RegisterValList[Registers$R0] )
 }
 
-
-
-
 ```
 
-# Memory Access
+# Trap Routines
 
 ```{r}
+TrapCodes <- list(
+    TRAP_GETC   = 0x20,
+    TRAP_OUT    = 0x21,
+    TRAP_PUTS   = 0x22,
+    TRAP_IN     = 0x23,  
+    TRAP_PUTSP  = 0x24,
+    TRAP_HALT   = 0x25
+)
+
+TRAP <- function(instr) {
+  switch (bitwAnd(instr, 0xFF),
+     TRAP_GETC = GETC(),
+     TRAP_OUT = OUT(),
+     TRAP_PUTS = PUTS(),
+     TRAP_IN = IN(),
+     TRAP_PUTSP = PUTSP(),
+     TRAP_HALT = HALT(),
+  )
+}
+
+PUTS() <- function() {
+  c <- MemoryList[RegisterValList[Registers$R0]]:length(MemoryList)
+  idx <- 1
+  
+  while (c[idx] != 0) {
+    cat(rawToChar(as.raw(c[idx])), sep = "")
+    idx <- idx + 1
+  }
+  flush.console()
+}
+
+GETC <- function() {
+  RegisterValList[Registers$R0] <- readLines(con = stdin(), n = 1)
+}
 
 
 ```
+
